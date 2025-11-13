@@ -3,7 +3,8 @@ import os
 import fitz
 import pandas as pd
 from openai import OpenAI
-
+from dotenv import load_dotenv
+load_dotenv()  # 加载 .env
 
 def _read_pdf(path: str) -> str:
     """PDF → text"""
@@ -48,7 +49,7 @@ def analyze_file(path: str) -> dict:
     if not text:
         return {"file": path, "doc_type": "unknown", "data": {}}
 
-    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    client = OpenAI()
 
     prompt = f"""
 You are an expert customs document analyzer.

@@ -18,12 +18,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 # ------------------------------
 # 测试 Root API
 # ------------------------------
 @app.get("/")
 def root():
     return {"message": "Customs AI Gateway is running."}
+
 
 # ------------------------------
 # 主业务：处理最新邮件 → 下载附件 → 分析 → 聚合 → 自动回复
