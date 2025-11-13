@@ -1,0 +1,11 @@
+﻿venv/
+.idea/
+*.iml
+token.pickle
+credentials.json
+__pycache__/
+attachments/
+output/
+*.log
+.env
+pyvenv.cfg
