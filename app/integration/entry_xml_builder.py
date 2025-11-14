@@ -3,7 +3,6 @@
 import xml.etree.ElementTree as ET
 from typing import Dict, Any
 
-
 def to_str(v):
     if v is None:
         return ""
@@ -20,10 +19,9 @@ def to_str(v):
         return to_str(v[0]) if v else ""
     return str(v)
 
-
 def build_entry_upload_xml(entry_json: Dict[str, Any]) -> str:
     """
-    生成 <entryUpload>...</entryUpload>，不带 <uploadEntry>
+    生成 <entryUpload>...</entryUpload>，不帶 <uploadEntry>
     不包含 username / password
     """
 
@@ -33,7 +31,10 @@ def build_entry_upload_xml(entry_json: Dict[str, Any]) -> str:
     # ---------------------- HEADER ----------------------
     header = ET.SubElement(entry, "entryHeader")
 
-    ET.SubElement(header, "entryNo").text = to_str(entry_json.get("entry_no"))
+    # === 關鍵：使用 system-generated 讓 NET CHB 自動生成 entry-no ===
+    entry_no_elem = ET.SubElement(header, "entry-no")
+    ET.SubElement(entry_no_elem, "system-generated")
+
     ET.SubElement(header, "entryType").text = to_str(entry_json.get("entry_type"))
     ET.SubElement(header, "importerNo").text = to_str(entry_json.get("importer_no"))
     ET.SubElement(header, "brokerNo").text = to_str(entry_json.get("broker_no"))
@@ -44,7 +45,7 @@ def build_entry_upload_xml(entry_json: Dict[str, Any]) -> str:
     ET.SubElement(header, "masterBOLNumber").text = to_str(entry_json.get("mbl"))
     ET.SubElement(header, "countryOfOrigin").text = to_str(entry_json.get("country_of_origin"))
 
-    # 🔥 必须是 N（不能自动传输）
+    # 🔥 必須是 N（不能自動傳輸）
     ET.SubElement(header, "transmitFlag").text = "N"
 
     # ---------------------- LINE ITEMS ----------------------
