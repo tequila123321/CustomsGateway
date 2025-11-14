@@ -9,7 +9,7 @@ print("API key 已加载，可以开始调用啦！")
 # —— 真正的验证开始 ——
 try:
     response = client.chat.completions.create(
-        model="gpt-4o-mini",  # 用一个便宜的模型测试，省钱
+        model="gpt-4o-2024-08-06",  # 用一个便宜的模型测试，省钱
         messages=[{"role": "user", "content": "地球半径是多大"}],
         max_tokens=50
     )
