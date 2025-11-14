@@ -1,5 +1,5 @@
 # app/integration/analyze_vision.py
-# 终极稳定版：本地抽取文本 + Vision 兜底 + 强健错误处理
+# 终极稳定版（含 Excel 多 Sheet 自动识别 — Invoice / Packing List）
 
 import base64
 import os
@@ -19,25 +19,23 @@ load_dotenv()
 client = OpenAI()
 
 # 全局安全参数
-MAX_PDF_PAGES_TEXT = 10          # 每个 PDF 抽取文本页数上限
-MAX_PDF_PAGES_IMAGES = 4         # 每个 PDF 转成图片的页数上限
-MAX_IMAGES_TOTAL = 8             # 所有附件总图片数上限
-MIN_TEXT_CHARS_FOR_TEXT_MODE = 80  # PDF 文本长度阈值，太短则认为是扫描件
-MAX_RAW_IN_ERROR = 800           # 错误信息里 raw 文本截断长度
+MAX_PDF_PAGES_TEXT = 10
+MAX_PDF_PAGES_IMAGES = 4
+MAX_IMAGES_TOTAL = 8
+MIN_TEXT_CHARS_FOR_TEXT_MODE = 80
+MAX_RAW_IN_ERROR = 800
 
 
 def safe_print(*args, **kwargs):
-    """避免某些环境下编码问题导致再次异常"""
     try:
         print(*args, **kwargs)
     except Exception:
         pass
 
 
-# ---------------------- 基础工具函数 ---------------------- #
+# ---------------------- PDF → 文本 ---------------------- #
 
 def pdf_to_text(path: str) -> str:
-    """从 PDF 抽取前几页的文本，失败则返回空字符串"""
     try:
         doc = fitz.open(path)
     except Exception as e:
@@ -53,22 +51,19 @@ def pdf_to_text(path: str) -> str:
                 t = page.get_text("text") or ""
                 texts.append(t)
             except Exception as e_page:
-                safe_print(f"[PDF] 抽取文本失败 {path} page {i+1}: {e_page}")
+                safe_print(f"[PDF] 文本提取失败 page {i+1}: {e_page}")
         doc.close()
     except Exception as e:
-        safe_print(f"[PDF] 抽取文本整体失败: {path} -> {e}")
+        safe_print(f"[PDF] 文本抽取崩溃: {path} -> {e}")
         return ""
 
     return "\n\n".join(texts).strip()
 
 
-def pdf_to_images(path: str, remaining_quota: int) -> List[Dict[str, Any]]:
-    """
-    将 PDF 的前几页转成 PNG base64。
-    remaining_quota 表示还允许多少张图片（避免无限膨胀）。
-    """
-    items = []
+# ---------------------- PDF → 图片（fallback） ---------------------- #
 
+def pdf_to_images(path: str, remaining_quota: int) -> List[Dict[str, Any]]:
+    items = []
     if remaining_quota <= 0:
         return items
 
@@ -84,15 +79,13 @@ def pdf_to_images(path: str, remaining_quota: int) -> List[Dict[str, Any]]:
         if i >= max_pages:
             break
         try:
-            # 尝试高分辨率
             try:
                 pix = page.get_pixmap(dpi=220, alpha=False)
             except Exception:
-                # fallback
                 pix = page.get_pixmap(alpha=False)
 
             img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
-            # 适当压缩尺寸，避免图片过大
+
             MAX_W = 2000
             if img.width > MAX_W:
                 ratio = MAX_W / img.width
@@ -104,77 +97,94 @@ def pdf_to_images(path: str, remaining_quota: int) -> List[Dict[str, Any]]:
 
             items.append({
                 "b64": b64,
-                "hint": f"PDF 文件 {os.path.basename(path)} 第 {i+1} 页，可能是提单或到货通知等。"
+                "hint": f"PDF {os.path.basename(path)} 第 {i+1} 页（扫描件）"
             })
         except Exception as e_page:
-            safe_print(f"[PDF] 转图片失败 {path} page {i+1}: {e_page}")
+            safe_print(f"[PDF] 图片转换失败 page {i+1}: {e_page}")
             continue
 
     doc.close()
     return items
 
 
-def excel_to_text(path: str) -> str:
+# ---------------------- Excel 自动识别（Invoice / PL） ---------------------- #
+
+def excel_to_sheet_info(path: str):
     """
-    将 Excel 的每个 sheet 简要转成文本描述：
-    Sheet 名 + 前几行的“表格内容”。
+    返回 Excel 多 Sheet 内容 + 自动识别类型（invoice / packing / unknown）
     """
     try:
         xls = pd.ExcelFile(path)
     except Exception as e:
         safe_print(f"[Excel] 打开失败: {path} -> {e}")
-        return ""
+        return []
 
-    sheets_text = []
+    results = []
+
     for sheet_name in xls.sheet_names:
         try:
             df = pd.read_excel(xls, sheet_name=sheet_name)
             df = df.fillna("")
-
-            # 只取前 N 行，避免太大
-            head_rows = 15
-            df_head = df.head(head_rows)
-
+            df_head = df.head(20)  # 只取前20行
             text_table = df_head.to_csv(index=False)
-            sheets_text.append(
-                f"Sheet: {sheet_name}\n"
-                f"内容预览(前 {head_rows} 行, CSV 格式):\n{text_table}\n"
-            )
+
+            # 自动识别 sheet 类型
+            content_str = " ".join(df_head.astype(str).values.flatten()).upper()
+
+            invoice_keywords = [
+                "INVOICE", "UNIT PRICE", "PRICE", "AMOUNT",
+                "TOTAL", "USD", "HS CODE", "VALUE"
+            ]
+            packing_keywords = [
+                "PACKING", "CARTON", "CARTONS", "GW", "NW",
+                "CBM", "DIMENSION", "PACKAGE", "PCS"
+            ]
+
+            score_invoice = sum(1 for kw in invoice_keywords if kw in content_str)
+            score_packing = sum(1 for kw in packing_keywords if kw in content_str)
+
+            if score_invoice > score_packing and score_invoice > 0:
+                sheet_type = "invoice"
+            elif score_packing > score_invoice and score_packing > 0:
+                sheet_type = "packing_list"
+            else:
+                sheet_type = "unknown"
+
+            results.append({
+                "sheet_name": sheet_name,
+                "type": sheet_type,
+                "text": text_table
+            })
+
         except Exception as e_sheet:
-            safe_print(f"[Excel] 读取 sheet 失败: {path} sheet={sheet_name} -> {e_sheet}")
+            safe_print(f"[Excel] 读取 sheet 失败 {sheet_name}: {e_sheet}")
             continue
 
-    return "\n\n".join(sheets_text).strip()
+    return results
 
+
+# ---------------------- 图片文件 → base64 ---------------------- #
 
 def image_file_to_b64(path: str) -> Dict[str, Any]:
-    """普通图片文件转 base64，失败返回 hint 提示。"""
-    item: Dict[str, Any] = {
+    item = {
         "b64": "",
-        "hint": f"图片文件 {os.path.basename(path)}（可能是提单、装箱单或到货通知扫描件）"
+        "hint": f"图片 {os.path.basename(path)}（扫描件）"
     }
     try:
         with open(path, "rb") as f:
-            data = f.read()
-        # 可以在这里做压缩/缩放，但先简单处理
-        b64 = base64.b64encode(data).decode()
+            b64 = base64.b64encode(f.read()).decode()
         item["b64"] = b64
     except Exception as e:
         safe_print(f"[Image] 打开失败: {path} -> {e}")
-        item["hint"] += "，⚠️ 读取失败，请忽略此图。"
+        item["hint"] += " ⚠️读取失败"
     return item
 
 
-# ---------------------- 聚合所有附件信息 ---------------------- #
+# ---------------------- 收集附件 payload ---------------------- #
 
 def build_file_payloads(file_paths: List[str]) -> Dict[str, Any]:
-    """
-    综合处理所有附件：
-    - text_chunks: 纯文本（PDF 文本、Excel 表格摘要等）
-    - images: Vision 用的图片（PDF 扫描件 / 图片附件）
-    """
-    text_chunks: List[str] = []
-    images: List[Dict[str, Any]] = []
+    text_chunks = []
+    images = []
     remaining_image_quota = MAX_IMAGES_TOTAL
 
     for path in file_paths:
@@ -182,173 +192,150 @@ def build_file_payloads(file_paths: List[str]) -> Dict[str, Any]:
         safe_print(f"[处理附件] {path}")
 
         if ext == ".pdf":
-            # 先抽文本
             txt = pdf_to_text(path)
             if txt:
                 text_chunks.append(
-                    f"以下是 PDF 文件 {os.path.basename(path)} 的文本内容（前 {MAX_PDF_PAGES_TEXT} 页）：\n{txt}\n"
+                    f"PDF 文件 {os.path.basename(path)} 的文本内容：\n{txt}\n"
                 )
 
-            # 如果文本很短，认为是扫描件，再加图片给 Vision
             if len(txt) < MIN_TEXT_CHARS_FOR_TEXT_MODE and remaining_image_quota > 0:
                 pdf_imgs = pdf_to_images(path, remaining_image_quota)
                 images.extend(pdf_imgs)
                 remaining_image_quota -= len(pdf_imgs)
 
         elif ext in [".xls", ".xlsx"]:
-            txt = excel_to_text(path)
-            if txt:
-                # 给 GPT 强提示：这是 Invoice / Packing List
-                upper_name = os.path.basename(path).upper()
-                if any(k in upper_name for k in ["INVOICE", "INV"]):
-                    tag = "这应该是 COMMERCIAL INVOICE（商业发票）"
-                elif any(k in upper_name for k in ["PACKING", "PL", "装箱"]):
-                    tag = "这应该是 PACKING LIST（装箱单）"
+            sheets = excel_to_sheet_info(path)
+            for s in sheets:
+                if s["type"] == "invoice":
+                    tag = "这是一张 Commercial Invoice（商业发票）"
+                elif s["type"] == "packing_list":
+                    tag = "这是一张 Packing List（装箱单）"
                 else:
                     tag = "请判断该表格是发票还是装箱单"
 
                 text_chunks.append(
-                    f"以下是 Excel 文件 {os.path.basename(path)} 的内容摘要（{tag}）：\n{txt}\n"
+                    f"Excel {os.path.basename(path)} - Sheet {s['sheet_name']}（自动识别类型：{s['type']}）\n"
+                    f"{tag}\n"
+                    f"内容（前20行CSV）：\n{s['text']}\n"
                 )
 
         else:
-            # 其它视为图片
             if remaining_image_quota > 0:
                 img_item = image_file_to_b64(path)
                 images.append(img_item)
                 remaining_image_quota -= 1
             else:
                 text_chunks.append(
-                    f"有一个图片附件 {os.path.basename(path)}，但已超过最大图片数量限制，请你根据其他信息完成提取。"
+                    f"图片 {os.path.basename(path)} 被忽略（超过图片上限）。"
                 )
 
     if not text_chunks and not images:
-        text_chunks.append("⚠️ 所有附件都无法解析，请你根据有限信息返回空字段 JSON。")
+        text_chunks.append("⚠️ 所有附件无法解析，请返回空结构 JSON。")
 
     return {"text_chunks": text_chunks, "images": images}
 
 
-# ---------------------- 调 GPT 获取结构化 JSON ---------------------- #
+# ---------------------- 构造 messages ---------------------- #
 
-def build_messages(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """构造发给 GPT 的 messages（文本 + 可选图片）。"""
+def build_messages(payload: Dict[str, Any]):
     text_chunks = payload["text_chunks"]
     images = payload["images"]
 
-    user_content: List[Dict[str, Any]] = []
+    user_content = []
 
-    # 说明任务 & 结构
     user_content.append({
         "type": "text",
         "text": (
-            "你是专业的美国报关单据分析 AI，请根据我提供的所有文本和图片，"
-            "提取提单(B/L)、商业发票(Commercial Invoice)、装箱单(Packing List)、"
-            "以及到货通知(Arrival Notice)中的信息，并严格按以下 JSON 结构返回（字段全部保留）：\n\n"
+            "你是美国清关单据分析 AI，请从提单、发票、装箱单、到货通知中提取所有信息。\n"
+            "并严格按以下 JSON 结构返回（所有字段必须存在）：\n\n"
             "{\n"
             '  "summary": {\n'
-            '    "container_no": "...",\n'
-            '    "seal_no": "...",\n'
-            '    "bl_no": "...",\n'
-            '    "firms_code": "...",\n'
-            '    "consignee": "...",\n'
-            '    "total_packages": "...",\n'
+            '    "container_no": null,\n'
+            '    "seal_no": null,\n'
+            '    "bl_no": null,\n'
+            '    "firms_code": null,\n'
+            '    "consignee": null,\n'
+            '    "total_packages": null,\n'
             '    "gross_weight_kg": 0,\n'
             '    "volume_cbm": 0,\n'
             '    "total_value_usd": 0\n'
             "  },\n"
-            '  "bill_of_lading": { },\n'
-            '  "commercial_invoice": { "source": null, "items": [] },\n'
-            '  "packing_list": { "source": null, "items": [] },\n'
-            '  "arrival_notice": { }\n'
-            "}\n\n"
-            "规则：\n"
-            "1. 所有字段必须存在，找不到的写 null 或 0。\n"
-            "2. summary 中的毛重、体积、件数等请尽量从提单/到货通知中汇总。\n"
-            "3. 如果只有提单和到货通知，没有发票或装箱单，相应对象保持结构但字段为 null 或空数组。\n"
-            "4. 只返回一段纯 JSON，不要任何解释，不要代码块标记。"
+            '  "bill_of_lading": {},\n'
+            '  "commercial_invoice": {"source": null, "items": []},\n'
+            '  "packing_list": {"source": null, "items": []},\n'
+            '  "arrival_notice": {}\n'
+            "}\n"
+            "返回 **纯 JSON**，无解释。"
         )
     })
 
-    # 附加所有文本块
+    # 加文本
     for i, chunk in enumerate(text_chunks, start=1):
         user_content.append({
             "type": "text",
-            "text": f"\n\n==== 文本块 {i} 开始 ====\n{chunk}\n==== 文本块 {i} 结束 ===="
+            "text": f"==== 文本块 {i} ====\n{chunk}"
         })
 
-    # 附加图片
+    # 加图片
     for img in images:
         if img.get("hint"):
             user_content.append({"type": "text", "text": img["hint"]})
         if img.get("b64"):
             user_content.append({
                 "type": "image_url",
-                "image_url": {
-                    "url": f"data:image/png;base64,{img['b64']}"
-                }
+                "image_url": {"url": f"data:image/png;base64,{img['b64']}"}
             })
 
     messages = [
-        {"role": "system", "content": "你是一名严谨的清关单据结构化专家，输出必须是有效 JSON。"},
+        {"role": "system", "content": "你是严谨的清关单据结构化专家，只能输出 JSON。"},
         {"role": "user", "content": user_content},
     ]
     return messages
 
 
-def call_gpt_and_parse_json(messages: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """调用 GPT 并尽量解析出 JSON。"""
+# ---------------------- GPT 调用 + JSON 恢复 ---------------------- #
+
+def call_gpt_and_parse_json(messages):
     try:
         resp = client.chat.completions.create(
-            model="gpt-4o-2024-08-06",   # 支持 vision，也可换成 gpt-4.1 等
+            model="gpt-4o-2024-08-06",
             messages=messages,
             temperature=0,
-            max_tokens=8192,
+            max_tokens=8192
         )
     except Exception as e:
-        safe_print(f"[OpenAI] API 调用失败: {e}")
         return {"error": f"OpenAI API 调用失败: {e}"}
 
     raw = resp.choices[0].message.content or ""
-    safe_print("[OpenAI] 原始返回前 400 字符：", raw[:400])
+    safe_print("[OpenAI] 返回前300：", raw[:300])
 
-    # 1. 直接尝试整体解析
-    raw_stripped = raw.strip()
+    # 直接解析
     try:
-        return json.loads(raw_stripped)
-    except Exception:
+        return json.loads(raw)
+    except:
         pass
 
-    # 2. 从中间截取第一个 { 到最后一个 } 再解析（防止前后有注释）
+    # 从 {} 中恢复
     try:
-        start = raw_stripped.index("{")
-        end = raw_stripped.rindex("}") + 1
-        candidate = raw_stripped[start:end]
-        return json.loads(candidate)
+        s = raw.index("{")
+        e = raw.rindex("}") + 1
+        return json.loads(raw[s:e])
     except Exception as e:
-        safe_print(f"[JSON] 解析失败: {e}")
         return {
-            "error": f"JSON 解析失败: {e}",
-            "raw_preview": raw_stripped[:MAX_RAW_IN_ERROR]
+            "error": f"JSON解析失败: {e}",
+            "raw_preview": raw[:MAX_RAW_IN_ERROR]
         }
 
 
-# ---------------------- 对外主函数 ---------------------- #
+# ---------------------- 主入口 ---------------------- #
 
 def analyze_with_vision(file_paths: List[str]) -> Dict[str, Any]:
-    """
-    主入口：
-    - file_paths: 本地已下载好的附件路径
-    - 返回：结构化 JSON 或带 error 的结果
-    """
     if not file_paths:
         return {"error": "no files"}
 
     try:
         payload = build_file_payloads(file_paths)
         messages = build_messages(payload)
-        result = call_gpt_and_parse_json(messages)
-        return result
+        return call_gpt_and_parse_json(messages)
     except Exception as e:
-        # 兜底，防止任何意外把上层搞挂
-        safe_print(f"[analyze_with_vision] 致命异常: {e}")
         return {"error": f"analyze_with_vision 崩溃: {e}"}
