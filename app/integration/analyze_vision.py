@@ -236,18 +236,35 @@ def build_file_payloads(file_paths: List[str]) -> Dict[str, Any]:
 
 
 # ---------------------- 构造 messages ---------------------- #
-
 def build_messages(payload: Dict[str, Any]):
     text_chunks = payload["text_chunks"]
     images = payload["images"]
 
     user_content = []
 
+    # =========================== 主提示 ===========================
     user_content.append({
         "type": "text",
         "text": (
-            "你是美国清关单据分析 AI，请从提单、发票、装箱单、到货通知中提取所有信息。\n"
-            "并严格按以下 JSON 结构返回（所有字段必须存在）：\n\n"
+            "你是美国清关单据分析 AI，需要从以下文件中提取结构化信息：\n"
+            "- 提单 Bill of Lading（Master / House）\n"
+            "- 到货通知 Arrival Notice\n"
+            "- 商业发票 Commercial Invoice\n"
+            "- 装箱单 Packing List\n\n"
+
+            "⚠️ 必须遵守的规则：\n"
+            "1. Master BL Number 必须以 4 字母 SCAC 开头（如 ZIMUxxxx、COSUxxxx）。\n"
+            "2. House BL Number 不以 4 字母开头，不能与 Master 混淆。\n"
+            "3. SCAC = Master BL Number 的前 4 位。\n"
+            "4. Arrival Notice 通常包含正确的 Master BL 和 FIRMS CODE → 必须优先使用。\n"
+            "5. FIRMS CODE 是必填字段：格式类似 WAC8、Y309、SLB5。\n"
+            "6. port_of_entry / port_of_unlading 必须是美国港口，不能输出中国港口（如 Ningbo、Yantian）。\n"
+            "   示例：Los Angeles → 2704，Long Beach → 2709，LAX → 2720。\n"
+            "7. Invoice items 必须提取：HS Code、Qty、UOM、Value、英文描述。\n"
+            "8. 所有字段必须存在，缺失字段填 null 或空数组。\n"
+            "9. 仅输出 JSON，不得包含任何解释文字。\n\n"
+
+            "返回的 JSON 结构如下：\n"
             "{\n"
             '  "summary": {\n'
             '    "container_no": null,\n'
@@ -261,24 +278,46 @@ def build_messages(payload: Dict[str, Any]):
             '    "volume_cbm": 0,\n'
             '    "total_value_usd": 0\n'
             "  },\n"
-            '  "bill_of_lading": {},\n'
-            '  "commercial_invoice": {"source": null, "items": []},\n'
-            '  "packing_list": {"source": null, "items": []},\n'
-            '  "arrival_notice": {}\n'
-            
+            '  "bill_of_lading": {\n'
+            '      "master_bl_no": null,\n'
+            '      "house_bl_no": null,\n'
+            '      "carrier_name": null,\n'
+            '      "port_of_loading": null,\n'
+            '      "port_of_discharge": null,\n'
+            '      "container_no": null,\n'
+            '      "seal_no": null,\n'
+            '      "packages": null,\n'
+            '      "gross_weight_kg": null,\n'
+            '      "volume_cbm": null\n'
+            "  },\n"
+            '  "commercial_invoice": {\n'
+            '      "source": null,\n'
+            '      "items": []\n'
+            "  },\n"
+            '  "packing_list": {\n'
+            '      "source": null,\n'
+            '      "items": []\n'
+            "  },\n"
+            '  "arrival_notice": {\n'
+            '      "master_bl_no": null,\n'
+            '      "house_bl_no": null,\n'
+            '      "firms_code": null,\n'
+            '      "carrier_name": null,\n'
+            '      "port_of_loading": null,\n'
+            '      "port_of_discharge": null\n'
+            "  }\n"
             "}\n"
-            "返回 **纯 JSON**，无解释。"
         )
     })
 
-    # 加文本
+    # =========================== 文本块 ===========================
     for i, chunk in enumerate(text_chunks, start=1):
         user_content.append({
             "type": "text",
             "text": f"==== 文本块 {i} ====\n{chunk}"
         })
 
-    # 加图片
+    # =========================== 图片块 ===========================
     for img in images:
         if img.get("hint"):
             user_content.append({"type": "text", "text": img["hint"]})
@@ -293,9 +332,6 @@ def build_messages(payload: Dict[str, Any]):
         {"role": "user", "content": user_content},
     ]
     return messages
-
-
-# ---------------------- GPT 调用 + JSON 恢复 ---------------------- #
 
 def call_gpt_and_parse_json(messages):
     try:
