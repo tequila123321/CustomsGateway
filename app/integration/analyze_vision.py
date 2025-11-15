@@ -255,6 +255,7 @@ def build_messages(payload: Dict[str, Any]):
             '    "bl_no": null,\n'
             '    "firms_code": null,\n'
             '    "consignee": null,\n'
+            '    "invoice_no": null,\n'
             '    "total_packages": null,\n'
             '    "gross_weight_kg": 0,\n'
             '    "volume_cbm": 0,\n'
@@ -264,6 +265,7 @@ def build_messages(payload: Dict[str, Any]):
             '  "commercial_invoice": {"source": null, "items": []},\n'
             '  "packing_list": {"source": null, "items": []},\n'
             '  "arrival_notice": {}\n'
+            
             "}\n"
             "返回 **纯 JSON**，无解释。"
         )

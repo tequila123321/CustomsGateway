@@ -77,12 +77,19 @@ def map_to_entry_json(raw: Dict[str, Any]) -> Dict[str, Any]:
 
     total_value_usd = summary.get("total_value_usd") or 0
 
-    # Items
+    #
+    # ------- FIXED ITEM MAPPING -------
     items_src = inv.get("items", []) or []
     items = []
+
     for it in items_src:
-        qty = it.get("quantity_pcs") or it.get("qty_pcs") or 0
-        value = it.get("total_value_usd") or 0
+        # GPT 给你的真实字段：
+        # pcs / ctns / total_price_usd / description / hs_code
+
+        qty = it.get("pcs") or it.get("quantity") or it.get("ctns") or 0
+        value = it.get("total_price_usd") or it.get("total_value_usd") or 0
+        desc = it.get("description") or it.get("english_desc") or ""
+
         items.append({
             "hs_code": safe(it.get("hs_code")),
             "origin": normalize_country("CN"),
@@ -90,7 +97,7 @@ def map_to_entry_json(raw: Dict[str, Any]) -> Dict[str, Any]:
             "qty": safe(qty),
             "uom": "PCS",
             "mid": None,
-            "description": safe(it.get("description_english")),
+            "description": safe(desc),
         })
 
     # 至少一筆
